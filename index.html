@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>PiP Timer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #111827;
+      color: #f9fafb;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      width: 420px;
+      padding: 28px;
+      border-radius: 20px;
+      background: #1f2937;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: 28px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    label {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 14px;
+      color: #d1d5db;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #4b5563;
+      border-radius: 12px;
+      background: #111827;
+      color: #f9fafb;
+      font-size: 20px;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: #60a5fa;
+    }
+
+    button {
+      width: 100%;
+      padding: 14px;
+      border: 0;
+      border-radius: 12px;
+      background: #2563eb;
+      color: white;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    .sub {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #9ca3af;
+      line-height: 1.5;
+    }
+
+    canvas {
+      width: 100%;
+      margin-top: 18px;
+      border-radius: 16px;
+      background: #030712;
+    }
+
+    video {
+      position: fixed;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .actions button {
+      flex: 1;
+    }
+
+    #resetBtn {
+      background: #4b5563;
+    }
+
+    #resetBtn:hover {
+      background: #374151;
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>PiP 타이머</h1>
+
+    <div class="row">
+      <label>
+        시간
+        <input id="hours" type="number" min="0" max="99" value="1" />
+      </label>
+
+      <label>
+        분
+        <input id="minutes" type="number" min="0" max="59" value="0" />
+      </label>
+    </div>
+
+    <button id="startBtn">타이머 PiP로 시작</button>
+
+    <div class="actions">
+      <button id="resetBtn">초기화</button>
+    </div>
+
+    <p id="status" class="sub">
+      버튼을 누르면 타이머가 동영상 PiP 창으로 뜸.
+    </p>
+
+    <canvas id="timerCanvas" width="960" height="540"></canvas>
+    <video id="pipVideo" muted playsinline></video>
+  </main>
+
+  <script>
+    const hoursInput = document.getElementById("hours");
+    const minutesInput = document.getElementById("minutes");
+    const startBtn = document.getElementById("startBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusEl = document.getElementById("status");
+
+    const canvas = document.getElementById("timerCanvas");
+    const ctx = canvas.getContext("2d");
+
+    const video = document.getElementById("pipVideo");
+
+    let stream = null;
+    let rafId = null;
+    let endAt = 0;
+    let totalMs = 0;
+    let running = false;
+    let finished = false;
+    let audioCtx = null;
+
+    function clampInt(value, min, max) {
+      const n = Math.trunc(Number(value) || 0);
+      return Math.min(max, Math.max(min, n));
+    }
+
+    function pad2(n) {
+      return String(n).padStart(2, "0");
+    }
+
+    function formatTime(ms) {
+      const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+      const h = Math.floor(totalSeconds / 3600);
+      const m = Math.floor((totalSeconds % 3600) / 60);
+      const s = totalSeconds % 60;
+      return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+    }
+
+    function drawTimer(remainMs, isFinished = false) {
+      const w = canvas.width;
+      const h = canvas.height;
+
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.fillStyle = "#030712";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#9ca3af";
+      ctx.font = "500 42px system-ui, sans-serif";
+      ctx.fillText(isFinished ? "TIMER FINISHED" : "REMAINING TIME", w / 2, 105);
+
+      ctx.fillStyle = isFinished ? "#f87171" : "#f9fafb";
+      ctx.font = "800 132px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      ctx.fillText(isFinished ? "00:00:00" : formatTime(remainMs), w / 2, 285);
+
+      const barX = 120;
+      const barY = 375;
+      const barW = w - 240;
+      const barH = 34;
+
+      ctx.fillStyle = "#1f2937";
+      roundRect(ctx, barX, barY, barW, barH, 17);
+      ctx.fill();
+
+      const ratio = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
+      ctx.fillStyle = isFinished ? "#ef4444" : "#60a5fa";
+      roundRect(ctx, barX, barY, barW * ratio, barH, 17);
+      ctx.fill();
+
+      // 하단 문구 제거
+    }
+
+    function roundRect(ctx, x, y, width, height, radius) {
+      const r = Math.min(radius, width / 2, height / 2);
+
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + width, y, x + width, y + height, r);
+      ctx.arcTo(x + width, y + height, x, y + height, r);
+      ctx.arcTo(x, y + height, x, y, r);
+      ctx.arcTo(x, y, x + width, y, r);
+      ctx.closePath();
+    }
+
+    function loop() {
+      if (!running) return;
+
+      const remainMs = endAt - performance.now();
+
+      if (remainMs <= 0) {
+        running = false;
+        finished = true;
+        drawTimer(0, true);
+        beep();
+        statusEl.textContent = "타이머 종료.";
+        return;
+      }
+
+      drawTimer(remainMs, false);
+      rafId = requestAnimationFrame(loop);
+    }
+
+    async function ensureAudioReady() {
+      try {
+        if (!audioCtx) {
+          audioCtx = new AudioContext();
+        }
+
+        if (audioCtx.state === "suspended") {
+          await audioCtx.resume();
+        }
+      } catch {
+        // 오디오 실패해도 타이머 자체는 계속 동작
+      }
+    }
+
+    function beep() {
+      try {
+        if (!audioCtx) return;
+
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = "sine";
+        osc.frequency.value = 880;
+
+        gain.gain.setValueAtTime(0.001, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.7);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.75);
+      } catch {
+        // 무시
+      }
+    }
+
+    async function startTimer() {
+      const hours = clampInt(hoursInput.value, 0, 99);
+      const minutes = clampInt(minutesInput.value, 0, 59);
+
+      hoursInput.value = hours;
+      minutesInput.value = minutes;
+
+      const durationSeconds = hours * 3600 + minutes * 60;
+
+      if (durationSeconds <= 0) {
+        statusEl.textContent = "최소 1분 이상 설정해야 함.";
+        return;
+      }
+
+      if (!("pictureInPictureEnabled" in document) || !document.pictureInPictureEnabled) {
+        statusEl.textContent = "이 브라우저는 Picture-in-Picture API를 지원하지 않음.";
+        return;
+      }
+
+      cancelAnimationFrame(rafId);
+
+      totalMs = durationSeconds * 1000;
+      endAt = performance.now() + totalMs;
+      running = true;
+      finished = false;
+
+      await ensureAudioReady();
+
+      drawTimer(totalMs, false);
+
+      if (!stream) {
+        stream = canvas.captureStream(30);
+        video.srcObject = stream;
+      }
+
+      try {
+        await video.play();
+
+        if (document.pictureInPictureElement !== video) {
+          await video.requestPictureInPicture();
+        }
+
+        statusEl.textContent = "PiP 타이머 실행 중.";
+        loop();
+      } catch (err) {
+        running = false;
+        statusEl.textContent = "PiP 실행 실패: 브라우저 권한 또는 지원 여부를 확인해야 함.";
+        console.error(err);
+      }
+    }
+
+    async function resetTimer() {
+      running = false;
+      finished = false;
+      cancelAnimationFrame(rafId);
+
+      totalMs = 0;
+      endAt = 0;
+
+      drawTimer(0, false);
+      statusEl.textContent = "초기화됨.";
+
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+        }
+      } catch {
+        // 무시
+      }
+    }
+
+    startBtn.addEventListener("click", startTimer);
+    resetBtn.addEventListener("click", resetTimer);
+
+    video.addEventListener("leavepictureinpicture", () => {
+      if (running) {
+        statusEl.textContent = "PiP 창은 닫혔지만 타이머는 페이지에서 계속 동작 중.";
+      }
+    });
+
+    drawTimer(0, false);
+  </script>
+</body>
+</html>
