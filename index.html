@@ -82,18 +82,18 @@
     #pauseBtn { background: #d97706; }
     #pauseBtn:hover:not(:disabled) { background: #b45309; }
 
-    #recordBtn { background: #059669; }
-    #recordBtn:hover:not(:disabled) { background: #047857; }
+    #resetBtn { background: #4b5563; }
+    #resetBtn:hover:not(:disabled) { background: #374151; }
 
-    #resetBtn, #clearRecordsBtn { background: #4b5563; }
-    #resetBtn:hover:not(:disabled), #clearRecordsBtn:hover:not(:disabled) { background: #374151; }
+    #deleteBtn { background: #991b1b; }
+    #deleteBtn:hover:not(:disabled) { background: #7f1d1d; }
 
     #exportBtn { background: #0891b2; }
     #exportBtn:hover:not(:disabled) { background: #0e7490; }
 
     .button-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 10px;
       margin-top: 12px;
     }
@@ -163,10 +163,17 @@
       top: 0;
       background: #111827;
       color: #d1d5db;
+      z-index: 1;
     }
 
     td {
       color: #e5e7eb;
+    }
+
+    .record-check {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
     }
 
     .empty {
@@ -180,8 +187,9 @@
         flex-direction: column;
       }
 
-      .button-grid {
-        grid-template-columns: 1fr 1fr;
+      .button-grid,
+      .record-actions {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -214,12 +222,11 @@
     <div class="button-grid">
       <button id="startBtn">시작</button>
       <button id="pauseBtn" disabled>일시정지</button>
-      <button id="recordBtn" disabled>기록 저장</button>
       <button id="resetBtn">초기화</button>
     </div>
 
     <p id="status" class="sub">
-      문제명을 입력하고 시작하면 문제별 풀이 시간이 기록됨. 기록은 이 브라우저에 저장됨.
+      문제명을 입력하고 시작하면 기록이 자동 생성됨. 타이머가 움직이는 동안 기록도 같이 갱신됨.
     </p>
 
     <canvas id="timerCanvas" width="960" height="540"></canvas>
@@ -230,8 +237,8 @@
       <div id="recordsView"></div>
 
       <div class="record-actions">
+        <button id="deleteBtn">삭제</button>
         <button id="exportBtn">CSV 내보내기</button>
-        <button id="clearRecordsBtn">기록 전체 삭제</button>
       </div>
     </section>
   </main>
@@ -246,10 +253,9 @@
     const openPipBtn = document.getElementById("openPipBtn");
     const startBtn = document.getElementById("startBtn");
     const pauseBtn = document.getElementById("pauseBtn");
-    const recordBtn = document.getElementById("recordBtn");
     const resetBtn = document.getElementById("resetBtn");
+    const deleteBtn = document.getElementById("deleteBtn");
     const exportBtn = document.getElementById("exportBtn");
-    const clearRecordsBtn = document.getElementById("clearRecordsBtn");
 
     const statusEl = document.getElementById("status");
     const recordsView = document.getElementById("recordsView");
@@ -267,9 +273,13 @@
 
     let running = false;
     let paused = false;
+
     let activeProblem = "";
+    let activeProblemKey = "";
     let startedAtText = "";
 
+    let selectedKeys = new Set();
+    let lastRenderedSecond = null;
     let audioCtx = null;
 
     function clampInt(value, min, max) {
@@ -308,6 +318,21 @@
         .replaceAll("'", "&#039;");
     }
 
+    function normalizeProblemKey(problem) {
+      return String(problem || "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+    }
+
+    function hasTypedProblemName() {
+      return problemInput.value.trim().length > 0;
+    }
+
+    function getProblemName() {
+      return problemInput.value.trim() || "이름 없는 문제";
+    }
+
     function getInputDurationMs() {
       const hours = clampInt(hoursInput.value, 0, 99);
       const minutes = clampInt(minutesInput.value, 0, 59);
@@ -316,11 +341,6 @@
       minutesInput.value = minutes;
 
       return (hours * 3600 + minutes * 60) * 1000;
-    }
-
-    function getProblemName() {
-      const value = problemInput.value.trim();
-      return value || "이름 없는 문제";
     }
 
     function getRecords() {
@@ -336,6 +356,58 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
     }
 
+    function getRecordKey(record) {
+      return normalizeProblemKey(record.problemKey || record.problem);
+    }
+
+    function makeCurrentRecord(status) {
+      const elapsedMs = Math.max(0, totalMs - remainingMs);
+
+      return {
+        savedAt: formatDate(),
+        problem: activeProblem,
+        problemKey: activeProblemKey,
+        startedAt: startedAtText || "-",
+        target: formatTime(totalMs),
+        elapsed: formatTime(elapsedMs),
+        remaining: formatTime(remainingMs),
+        status
+      };
+    }
+
+    function upsertCurrentRecord(status, shouldRender = true) {
+      if (!activeProblemKey) return false;
+
+      const record = makeCurrentRecord(status);
+      const records = getRecords();
+
+      const filtered = records.filter((r) => getRecordKey(r) !== activeProblemKey);
+      filtered.push(record);
+
+      setRecords(filtered);
+
+      if (shouldRender) {
+        renderRecords();
+      }
+
+      return true;
+    }
+
+    function deleteRecordByKey(problemKey) {
+      if (!problemKey) return false;
+
+      const records = getRecords();
+      const next = records.filter((r) => getRecordKey(r) !== problemKey);
+
+      if (next.length === records.length) return false;
+
+      selectedKeys.delete(problemKey);
+      setRecords(next);
+      renderRecords();
+
+      return true;
+    }
+
     function renderRecords() {
       const records = getRecords();
 
@@ -344,18 +416,21 @@
         return;
       }
 
-      const rows = records.slice().reverse().map((r, idx) => {
-        const realIndex = records.length - 1 - idx;
+      const rows = records.slice().reverse().map((r) => {
+        const key = getRecordKey(r);
+        const checked = selectedKeys.has(key) ? "checked" : "";
 
         return `
           <tr>
-            <td>${escapeHtml(r.savedAt)}</td>
-            <td>${escapeHtml(r.problem)}</td>
-            <td>${escapeHtml(r.target)}</td>
-            <td>${escapeHtml(r.elapsed)}</td>
-            <td>${escapeHtml(r.remaining)}</td>
-            <td>${escapeHtml(r.result)}</td>
-            <td><button data-delete-index="${realIndex}" style="padding:6px 9px;font-size:12px;background:#991b1b;">삭제</button></td>
+            <td>
+              <input type="checkbox" class="record-check" data-record-key="${escapeHtml(key)}" ${checked}>
+            </td>
+            <td>${escapeHtml(r.savedAt || "-")}</td>
+            <td>${escapeHtml(r.problem || "-")}</td>
+            <td>${escapeHtml(r.target || "-")}</td>
+            <td>${escapeHtml(r.elapsed || "-")}</td>
+            <td>${escapeHtml(r.remaining || "-")}</td>
+            <td>${escapeHtml(r.status || r.result || "-")}</td>
           </tr>
         `;
       }).join("");
@@ -365,13 +440,13 @@
           <table>
             <thead>
               <tr>
-                <th>저장 시각</th>
+                <th>선택</th>
+                <th>갱신 시각</th>
                 <th>문제</th>
                 <th>목표</th>
                 <th>사용</th>
                 <th>남은 시간</th>
                 <th>상태</th>
-                <th></th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -379,36 +454,63 @@
         </div>
       `;
 
-      recordsView.querySelectorAll("[data-delete-index]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const index = Number(btn.dataset.deleteIndex);
-          const next = getRecords();
-          next.splice(index, 1);
-          setRecords(next);
-          renderRecords();
-          statusEl.textContent = "기록 1개 삭제됨.";
+      recordsView.querySelectorAll(".record-check").forEach((box) => {
+        box.addEventListener("change", () => {
+          const key = box.dataset.recordKey;
+
+          if (box.checked) {
+            selectedKeys.add(key);
+          } else {
+            selectedKeys.delete(key);
+          }
         });
       });
     }
 
-    function saveRecord(result) {
-      const elapsedMs = Math.max(0, totalMs - remainingMs);
-      const record = {
-        savedAt: formatDate(),
-        problem: activeProblem || getProblemName(),
-        startedAt: startedAtText || "-",
-        target: formatTime(totalMs),
-        elapsed: formatTime(elapsedMs),
-        remaining: formatTime(remainingMs),
-        result
-      };
+    function deleteSelectedRecords() {
+      const checked = [...recordsView.querySelectorAll(".record-check:checked")]
+        .map((box) => box.dataset.recordKey);
 
-      const records = getRecords();
-      records.push(record);
-      setRecords(records);
+      if (checked.length === 0) {
+        statusEl.textContent = "선택된 기록이 없음.";
+        return;
+      }
+
+      const deletingActive = activeProblemKey && checked.includes(activeProblemKey);
+
+      if (deletingActive) {
+        const ok = confirm("현재 진행 중인 문제 기록이 포함되어 있음. 삭제하면 타이머도 초기화됨. 삭제할까요?");
+        if (!ok) return;
+      } else {
+        const ok = confirm(`선택한 기록 ${checked.length}개를 삭제할까요?`);
+        if (!ok) return;
+      }
+
+      const deleteSet = new Set(checked);
+      const next = getRecords().filter((r) => !deleteSet.has(getRecordKey(r)));
+
+      setRecords(next);
+
+      for (const key of deleteSet) {
+        selectedKeys.delete(key);
+      }
+
+      if (deletingActive) {
+        cancelAnimationFrame(rafId);
+        running = false;
+        paused = false;
+        activeProblemKey = "";
+        activeProblem = hasTypedProblemName() ? getProblemName() : "";
+        startedAtText = "";
+        totalMs = getInputDurationMs() || 60 * 60 * 1000;
+        remainingMs = totalMs;
+        setControls();
+        drawTimer(remainingMs, "ready");
+      }
+
       renderRecords();
 
-      statusEl.textContent = `기록 저장됨: ${record.problem} / 사용 ${record.elapsed}`;
+      statusEl.textContent = `기록 ${checked.length}개 삭제됨.`;
     }
 
     function exportCsv() {
@@ -419,7 +521,7 @@
         return;
       }
 
-      const headers = ["savedAt", "problem", "startedAt", "target", "elapsed", "remaining", "result"];
+      const headers = ["savedAt", "problem", "startedAt", "target", "elapsed", "remaining", "status"];
 
       const escapeCsv = (value) => {
         const s = String(value ?? "");
@@ -443,14 +545,6 @@
 
       URL.revokeObjectURL(url);
       statusEl.textContent = "CSV 파일로 내보냄.";
-    }
-
-    function clearRecords() {
-      if (!confirm("저장된 문제 기록을 전부 삭제할까요?")) return;
-
-      localStorage.removeItem(STORAGE_KEY);
-      renderRecords();
-      statusEl.textContent = "기록 전체 삭제됨.";
     }
 
     function roundRect(ctx, x, y, width, height, radius) {
@@ -543,7 +637,19 @@
     function setControls() {
       pauseBtn.disabled = !(running || paused);
       pauseBtn.textContent = paused ? "계속" : "일시정지";
-      recordBtn.disabled = !(running || paused);
+    }
+
+    function syncLiveRecord(status) {
+      if (!activeProblemKey) return;
+
+      const sec = Math.ceil(Math.max(0, remainingMs) / 1000);
+
+      if (sec === lastRenderedSecond && status === "진행 중") {
+        return;
+      }
+
+      lastRenderedSecond = sec;
+      upsertCurrentRecord(status, true);
     }
 
     function loop() {
@@ -559,14 +665,19 @@
         cancelAnimationFrame(rafId);
         drawTimer(0, "finished");
         setControls();
-        beep();
-        saveRecord("시간 종료");
 
-        statusEl.textContent = "타이머 종료. 기록 자동 저장됨.";
+        syncLiveRecord("시간 종료");
+        beep();
+
+        statusEl.textContent = activeProblemKey
+          ? "타이머 종료. 기록이 최종 상태로 갱신됨."
+          : "타이머 종료.";
         return;
       }
 
       drawTimer(remainingMs, "running");
+      syncLiveRecord("진행 중");
+
       rafId = requestAnimationFrame(loop);
     }
 
@@ -646,6 +757,7 @@
       cancelAnimationFrame(rafId);
 
       activeProblem = getProblemName();
+      activeProblemKey = hasTypedProblemName() ? normalizeProblemKey(activeProblem) : "";
       startedAtText = formatDate();
 
       totalMs = durationMs;
@@ -654,11 +766,18 @@
 
       running = true;
       paused = false;
+      lastRenderedSecond = null;
 
       setControls();
       drawTimer(remainingMs, "running");
 
-      statusEl.textContent = `타이머 실행 중: ${activeProblem}`;
+      if (activeProblemKey) {
+        upsertCurrentRecord("진행 중", true);
+        statusEl.textContent = `타이머 시작 + 기록 실시간 갱신: ${activeProblem}`;
+      } else {
+        statusEl.textContent = "타이머 실행 중. 문제명을 입력하지 않아서 기록은 저장하지 않음.";
+      }
+
       loop();
     }
 
@@ -670,8 +789,9 @@
 
         cancelAnimationFrame(rafId);
         drawTimer(remainingMs, "paused");
+        syncLiveRecord("일시정지");
 
-        statusEl.textContent = "일시정지됨.";
+        statusEl.textContent = "일시정지됨. 기록도 일시정지 상태로 갱신됨.";
         setControls();
         return;
       }
@@ -680,8 +800,11 @@
         endAt = performance.now() + remainingMs;
         running = true;
         paused = false;
+        lastRenderedSecond = null;
 
         drawTimer(remainingMs, "running");
+        syncLiveRecord("진행 중");
+
         statusEl.textContent = "다시 진행 중.";
         setControls();
         loop();
@@ -690,6 +813,9 @@
 
     function resetTimer() {
       cancelAnimationFrame(rafId);
+
+      const keyToDelete = activeProblemKey || (hasTypedProblemName() ? normalizeProblemKey(getProblemName()) : "");
+      const deleted = deleteRecordByKey(keyToDelete);
 
       totalMs = getInputDurationMs();
       if (totalMs <= 0) {
@@ -701,36 +827,48 @@
 
       running = false;
       paused = false;
-      activeProblem = getProblemName();
+      activeProblem = hasTypedProblemName() ? getProblemName() : "";
+      activeProblemKey = "";
       startedAtText = "";
+      lastRenderedSecond = null;
 
       drawTimer(remainingMs, "ready");
       setControls();
+      renderRecords();
 
-      statusEl.textContent = "초기화됨. PiP 창은 유지됨.";
+      statusEl.textContent = deleted
+        ? "초기화됨. 해당 문제 기록도 삭제됨."
+        : "초기화됨.";
     }
 
     openPipBtn.addEventListener("click", openPiP);
     startBtn.addEventListener("click", startTimer);
     pauseBtn.addEventListener("click", togglePause);
     resetBtn.addEventListener("click", resetTimer);
-    recordBtn.addEventListener("click", () => saveRecord(paused ? "수동 저장 / 일시정지" : "수동 저장 / 진행 중"));
+    deleteBtn.addEventListener("click", deleteSelectedRecords);
     exportBtn.addEventListener("click", exportCsv);
-    clearRecordsBtn.addEventListener("click", clearRecords);
 
     problemInput.addEventListener("input", () => {
       if (!running && !paused) {
-        activeProblem = getProblemName();
+        activeProblem = hasTypedProblemName() ? getProblemName() : "";
         drawTimer(remainingMs, "ready");
       }
     });
 
     hoursInput.addEventListener("input", () => {
-      if (!running && !paused) resetTimer();
+      if (!running && !paused) {
+        totalMs = getInputDurationMs() || 60 * 60 * 1000;
+        remainingMs = totalMs;
+        drawTimer(remainingMs, "ready");
+      }
     });
 
     minutesInput.addEventListener("input", () => {
-      if (!running && !paused) resetTimer();
+      if (!running && !paused) {
+        totalMs = getInputDurationMs() || 60 * 60 * 1000;
+        remainingMs = totalMs;
+        drawTimer(remainingMs, "ready");
+      }
     });
 
     video.addEventListener("leavepictureinpicture", () => {
@@ -742,7 +880,10 @@
     });
 
     renderRecords();
-    resetTimer();
+    totalMs = getInputDurationMs() || 60 * 60 * 1000;
+    remainingMs = totalMs;
+    drawTimer(remainingMs, "ready");
+    setControls();
   </script>
 </body>
 </html>
