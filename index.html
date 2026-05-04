@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <title>PiP Timer</title>
+  <title>Problem PiP Timer</title>
   <style>
     * { box-sizing: border-box; }
 
@@ -17,7 +17,7 @@
     }
 
     .app {
-      width: 440px;
+      width: min(760px, calc(100vw - 28px));
       padding: 28px;
       border-radius: 20px;
       background: #1f2937;
@@ -51,7 +51,7 @@
       border-radius: 12px;
       background: #111827;
       color: #f9fafb;
-      font-size: 20px;
+      font-size: 18px;
       outline: none;
     }
 
@@ -63,7 +63,7 @@
       border: 0;
       border-radius: 12px;
       color: white;
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 700;
       cursor: pointer;
     }
@@ -82,10 +82,23 @@
     #pauseBtn { background: #d97706; }
     #pauseBtn:hover:not(:disabled) { background: #b45309; }
 
-    #resetBtn { background: #4b5563; }
-    #resetBtn:hover:not(:disabled) { background: #374151; }
+    #recordBtn { background: #059669; }
+    #recordBtn:hover:not(:disabled) { background: #047857; }
+
+    #resetBtn, #clearRecordsBtn { background: #4b5563; }
+    #resetBtn:hover:not(:disabled), #clearRecordsBtn:hover:not(:disabled) { background: #374151; }
+
+    #exportBtn { background: #0891b2; }
+    #exportBtn:hover:not(:disabled) { background: #0e7490; }
 
     .button-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .record-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 10px;
@@ -113,11 +126,76 @@
       opacity: 0;
       pointer-events: none;
     }
+
+    .records {
+      margin-top: 22px;
+      border-top: 1px solid #374151;
+      padding-top: 18px;
+    }
+
+    .records h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+
+    .table-wrap {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid #374151;
+      border-radius: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 10px;
+      border-bottom: 1px solid #374151;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #111827;
+      color: #d1d5db;
+    }
+
+    td {
+      color: #e5e7eb;
+    }
+
+    .empty {
+      padding: 18px;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+
+    @media (max-width: 680px) {
+      .row {
+        flex-direction: column;
+      }
+
+      .button-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
   </style>
 </head>
 <body>
   <main class="app">
-    <h1>PiP 타이머</h1>
+    <h1>문제별 PiP 타이머</h1>
+
+    <div class="row">
+      <label>
+        문제명 / 번호
+        <input id="problemInput" type="text" placeholder="예: BOJ 13511 트리와 쿼리 2" />
+      </label>
+    </div>
 
     <div class="row">
       <label>
@@ -136,27 +214,45 @@
     <div class="button-grid">
       <button id="startBtn">시작</button>
       <button id="pauseBtn" disabled>일시정지</button>
+      <button id="recordBtn" disabled>기록 저장</button>
       <button id="resetBtn">초기화</button>
     </div>
 
     <p id="status" class="sub">
-      PiP 열기 버튼은 창만 띄우고, 시작 버튼은 타이머만 시작함.
+      문제명을 입력하고 시작하면 문제별 풀이 시간이 기록됨. 기록은 이 브라우저에 저장됨.
     </p>
 
     <canvas id="timerCanvas" width="960" height="540"></canvas>
     <video id="pipVideo" muted playsinline></video>
+
+    <section class="records">
+      <h2>기록</h2>
+      <div id="recordsView"></div>
+
+      <div class="record-actions">
+        <button id="exportBtn">CSV 내보내기</button>
+        <button id="clearRecordsBtn">기록 전체 삭제</button>
+      </div>
+    </section>
   </main>
 
   <script>
+    const STORAGE_KEY = "problem_pip_timer_records_v1";
+
+    const problemInput = document.getElementById("problemInput");
     const hoursInput = document.getElementById("hours");
     const minutesInput = document.getElementById("minutes");
 
     const openPipBtn = document.getElementById("openPipBtn");
     const startBtn = document.getElementById("startBtn");
     const pauseBtn = document.getElementById("pauseBtn");
+    const recordBtn = document.getElementById("recordBtn");
     const resetBtn = document.getElementById("resetBtn");
+    const exportBtn = document.getElementById("exportBtn");
+    const clearRecordsBtn = document.getElementById("clearRecordsBtn");
 
     const statusEl = document.getElementById("status");
+    const recordsView = document.getElementById("recordsView");
 
     const canvas = document.getElementById("timerCanvas");
     const ctx = canvas.getContext("2d");
@@ -171,6 +267,9 @@
 
     let running = false;
     let paused = false;
+    let activeProblem = "";
+    let startedAtText = "";
+
     let audioCtx = null;
 
     function clampInt(value, min, max) {
@@ -190,6 +289,25 @@
       return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
     }
 
+    function formatDate(date = new Date()) {
+      const y = date.getFullYear();
+      const mo = pad2(date.getMonth() + 1);
+      const d = pad2(date.getDate());
+      const h = pad2(date.getHours());
+      const mi = pad2(date.getMinutes());
+      const s = pad2(date.getSeconds());
+      return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
     function getInputDurationMs() {
       const hours = clampInt(hoursInput.value, 0, 99);
       const minutes = clampInt(minutesInput.value, 0, 59);
@@ -198,6 +316,141 @@
       minutesInput.value = minutes;
 
       return (hours * 3600 + minutes * 60) * 1000;
+    }
+
+    function getProblemName() {
+      const value = problemInput.value.trim();
+      return value || "이름 없는 문제";
+    }
+
+    function getRecords() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function setRecords(records) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    }
+
+    function renderRecords() {
+      const records = getRecords();
+
+      if (records.length === 0) {
+        recordsView.innerHTML = '<div class="empty">아직 저장된 기록 없음.</div>';
+        return;
+      }
+
+      const rows = records.slice().reverse().map((r, idx) => {
+        const realIndex = records.length - 1 - idx;
+
+        return `
+          <tr>
+            <td>${escapeHtml(r.savedAt)}</td>
+            <td>${escapeHtml(r.problem)}</td>
+            <td>${escapeHtml(r.target)}</td>
+            <td>${escapeHtml(r.elapsed)}</td>
+            <td>${escapeHtml(r.remaining)}</td>
+            <td>${escapeHtml(r.result)}</td>
+            <td><button data-delete-index="${realIndex}" style="padding:6px 9px;font-size:12px;background:#991b1b;">삭제</button></td>
+          </tr>
+        `;
+      }).join("");
+
+      recordsView.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>저장 시각</th>
+                <th>문제</th>
+                <th>목표</th>
+                <th>사용</th>
+                <th>남은 시간</th>
+                <th>상태</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+
+      recordsView.querySelectorAll("[data-delete-index]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const index = Number(btn.dataset.deleteIndex);
+          const next = getRecords();
+          next.splice(index, 1);
+          setRecords(next);
+          renderRecords();
+          statusEl.textContent = "기록 1개 삭제됨.";
+        });
+      });
+    }
+
+    function saveRecord(result) {
+      const elapsedMs = Math.max(0, totalMs - remainingMs);
+      const record = {
+        savedAt: formatDate(),
+        problem: activeProblem || getProblemName(),
+        startedAt: startedAtText || "-",
+        target: formatTime(totalMs),
+        elapsed: formatTime(elapsedMs),
+        remaining: formatTime(remainingMs),
+        result
+      };
+
+      const records = getRecords();
+      records.push(record);
+      setRecords(records);
+      renderRecords();
+
+      statusEl.textContent = `기록 저장됨: ${record.problem} / 사용 ${record.elapsed}`;
+    }
+
+    function exportCsv() {
+      const records = getRecords();
+
+      if (records.length === 0) {
+        statusEl.textContent = "내보낼 기록이 없음.";
+        return;
+      }
+
+      const headers = ["savedAt", "problem", "startedAt", "target", "elapsed", "remaining", "result"];
+
+      const escapeCsv = (value) => {
+        const s = String(value ?? "");
+        return `"${s.replaceAll('"', '""')}"`;
+      };
+
+      const csv = [
+        headers.join(","),
+        ...records.map((r) => headers.map((h) => escapeCsv(r[h])).join(","))
+      ].join("\n");
+
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "problem_timer_records.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      URL.revokeObjectURL(url);
+      statusEl.textContent = "CSV 파일로 내보냄.";
+    }
+
+    function clearRecords() {
+      if (!confirm("저장된 문제 기록을 전부 삭제할까요?")) return;
+
+      localStorage.removeItem(STORAGE_KEY);
+      renderRecords();
+      statusEl.textContent = "기록 전체 삭제됨.";
     }
 
     function roundRect(ctx, x, y, width, height, radius) {
@@ -212,6 +465,18 @@
       ctx.arcTo(x, y + height, x, y, r);
       ctx.arcTo(x, y, x + width, y, r);
       ctx.closePath();
+    }
+
+    function fitText(text, maxWidth, startSize, minSize, weight = "600", family = "system-ui, sans-serif") {
+      let size = startSize;
+
+      while (size > minSize) {
+        ctx.font = `${weight} ${size}px ${family}`;
+        if (ctx.measureText(text).width <= maxWidth) break;
+        size -= 2;
+      }
+
+      return `${weight} ${size}px ${family}`;
     }
 
     function drawTimer(remainMs, mode = "ready") {
@@ -238,17 +503,24 @@
         barColor = "#ef4444";
       }
 
+      const problem = activeProblem || getProblemName();
+
       ctx.textAlign = "center";
+
+      ctx.fillStyle = "#d1d5db";
+      ctx.font = fitText(problem, w - 120, 42, 24, "700");
+      ctx.fillText(problem, w / 2, 78);
+
       ctx.fillStyle = "#9ca3af";
-      ctx.font = "500 46px system-ui, sans-serif";
-      ctx.fillText(label, w / 2, 110);
+      ctx.font = "500 34px system-ui, sans-serif";
+      ctx.fillText(label, w / 2, 132);
 
       ctx.fillStyle = mainColor;
       ctx.font = "800 140px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-      ctx.fillText(formatTime(remainMs), w / 2, 292);
+      ctx.fillText(formatTime(remainMs), w / 2, 300);
 
       const barX = 120;
-      const barY = 382;
+      const barY = 386;
       const barW = w - 240;
       const barH = 34;
 
@@ -261,11 +533,17 @@
       ctx.fillStyle = barColor;
       roundRect(ctx, barX, barY, barW * ratio, barH, 17);
       ctx.fill();
+
+      const elapsed = formatTime(Math.max(0, totalMs - remainMs));
+      ctx.fillStyle = "#6b7280";
+      ctx.font = "400 28px system-ui, sans-serif";
+      ctx.fillText(`USED ${elapsed}`, w / 2, 475);
     }
 
     function setControls() {
       pauseBtn.disabled = !(running || paused);
       pauseBtn.textContent = paused ? "계속" : "일시정지";
+      recordBtn.disabled = !(running || paused);
     }
 
     function loop() {
@@ -282,8 +560,9 @@
         drawTimer(0, "finished");
         setControls();
         beep();
+        saveRecord("시간 종료");
 
-        statusEl.textContent = "타이머 종료.";
+        statusEl.textContent = "타이머 종료. 기록 자동 저장됨.";
         return;
       }
 
@@ -366,6 +645,9 @@
 
       cancelAnimationFrame(rafId);
 
+      activeProblem = getProblemName();
+      startedAtText = formatDate();
+
       totalMs = durationMs;
       remainingMs = durationMs;
       endAt = performance.now() + remainingMs;
@@ -376,7 +658,7 @@
       setControls();
       drawTimer(remainingMs, "running");
 
-      statusEl.textContent = "타이머 실행 중.";
+      statusEl.textContent = `타이머 실행 중: ${activeProblem}`;
       loop();
     }
 
@@ -419,6 +701,8 @@
 
       running = false;
       paused = false;
+      activeProblem = getProblemName();
+      startedAtText = "";
 
       drawTimer(remainingMs, "ready");
       setControls();
@@ -430,6 +714,24 @@
     startBtn.addEventListener("click", startTimer);
     pauseBtn.addEventListener("click", togglePause);
     resetBtn.addEventListener("click", resetTimer);
+    recordBtn.addEventListener("click", () => saveRecord(paused ? "수동 저장 / 일시정지" : "수동 저장 / 진행 중"));
+    exportBtn.addEventListener("click", exportCsv);
+    clearRecordsBtn.addEventListener("click", clearRecords);
+
+    problemInput.addEventListener("input", () => {
+      if (!running && !paused) {
+        activeProblem = getProblemName();
+        drawTimer(remainingMs, "ready");
+      }
+    });
+
+    hoursInput.addEventListener("input", () => {
+      if (!running && !paused) resetTimer();
+    });
+
+    minutesInput.addEventListener("input", () => {
+      if (!running && !paused) resetTimer();
+    });
 
     video.addEventListener("leavepictureinpicture", () => {
       if (running) {
@@ -439,6 +741,7 @@
       }
     });
 
+    renderRecords();
     resetTimer();
   </script>
 </body>
